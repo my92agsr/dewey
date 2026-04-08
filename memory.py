@@ -92,6 +92,10 @@ class Memory:
         metadata: Optional[dict] = None,
     ) -> int:
         """Store a memory with its embedding."""
+        existing = self.find_exact(content=content, collection=collection, category=category)
+        if existing is not None:
+            return existing
+
         embedding = self.embed(content)
         timestamp = time.time()
         meta_json = json.dumps(metadata or {})
@@ -109,6 +113,14 @@ class Memory:
         )
         self.conn.commit()
         return memory_id
+
+    def find_exact(self, content: str, collection: str, category: str = "") -> Optional[int]:
+        """Return an existing memory id for an exact match, if present."""
+        row = self.conn.execute(
+            "SELECT id FROM memories WHERE collection = ? AND content = ? AND category = ?",
+            (collection, content, category),
+        ).fetchone()
+        return row[0] if row else None
 
     def retrieve(
         self,

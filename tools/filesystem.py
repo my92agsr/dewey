@@ -21,8 +21,12 @@ def save_lesson_plan(title: str, content: str, grade: str = "", subject: str = "
     """
     timestamp = datetime.now().strftime("%Y-%m-%d")
     slug = slugify(title)
-    filename = f"{timestamp}_{slug}.md"
-    filepath = config.PLANS_DIR / filename
+    base_filename = f"{timestamp}_{slug}"
+    filepath = config.PLANS_DIR / f"{base_filename}.md"
+    suffix = 2
+    while filepath.exists():
+        filepath = config.PLANS_DIR / f"{base_filename}_{suffix}.md"
+        suffix += 1
 
     # Build frontmatter
     frontmatter_lines = [

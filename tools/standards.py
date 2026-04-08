@@ -239,6 +239,10 @@ TOOLS = [
                     "type": "string",
                     "description": "Language domain: Listening, Speaking, Reading, or Writing. Leave empty for all.",
                 },
+                "grade_band": {
+                    "type": "string",
+                    "description": "Optional grade band filter (for current data this is typically 'K-12').",
+                },
             },
         },
     },
