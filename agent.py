@@ -126,9 +126,10 @@ def main(reset: bool):
         click.echo("\nLooks like this is your first time here. Let's get acquainted.\n")
         run_onboarding(memory, ferpa_filter)
 
-    click.echo("Ready to plan. Type 'quit' to exit.\n")
+    click.echo("Ready to plan. Type '/save' to save the last response, 'quit' to exit.\n")
 
     messages: list[dict] = []
+    last_response: str = ""
 
     while True:
         try:
@@ -143,6 +144,17 @@ def main(reset: bool):
         if teacher_input.lower() in ("quit", "exit", "q"):
             click.echo("See you next period. ✌️")
             break
+
+        # /save — write the last response to a markdown file
+        if teacher_input.lower().startswith("/save"):
+            if not last_response:
+                click.echo("Nothing to save yet.\n")
+                continue
+            # Optional: title after /save, e.g. "/save Fractions Lesson Grade 4"
+            title = teacher_input[5:].strip() or "Untitled Lesson"
+            path = filesystem.save_lesson_plan(title=title, content=last_response)
+            click.echo(click.style(f"  Saved to {path}\n", fg="green"))
+            continue
 
         # FERPA filter — strip PII before it hits the API
         cleaned_input, had_pii = ferpa_filter(teacher_input)
@@ -228,6 +240,7 @@ def main(reset: bool):
 
         # Record final assistant message in the conversation history
         messages.append({"role": "assistant", "content": assistant_msg})
+        last_response = assistant_msg
 
         # Display response
         if tool_log:
