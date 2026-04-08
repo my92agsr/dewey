@@ -120,7 +120,7 @@ def main(reset: bool):
     # Onboarding if no profile exists
     if not memory.has_profile():
         click.echo("\nLooks like this is your first time here. Let's get acquainted.\n")
-        run_onboarding(memory)
+        run_onboarding(memory, ferpa_filter)
 
     click.echo("Ready to plan. Type 'quit' to exit.\n")
 
