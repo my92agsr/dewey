@@ -97,7 +97,7 @@ def extract_and_store_memories(
                 else config.CONVERSATION_COLLECTION
             )
             memory.store(content=content, collection=collection, category=category)
-    except (json.JSONDecodeError, Exception):
+    except Exception:
         # Memory extraction is best-effort — don't crash the conversation
         pass
 
@@ -110,7 +110,14 @@ def main(reset: bool):
         config.DB_PATH.unlink(missing_ok=True)
         click.echo("Memory cleared. Starting fresh.\n")
 
-    memory = Memory()
+    try:
+        memory = Memory()
+    except Exception as exc:
+        raise click.ClickException(f"Unable to initialize memory: {exc}") from exc
+
+    if not config.ANTHROPIC_API_KEY:
+        raise click.ClickException("ANTHROPIC_API_KEY is not set.")
+
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
     click.echo("=" * 60)
@@ -144,7 +151,17 @@ def main(reset: bool):
         cleaned_input, had_pii = ferpa_filter(teacher_input)
 
         # Build context from memory
-        profile_text, memory_text = build_context(memory, cleaned_input)
+        try:
+            profile_text, memory_text = build_context(memory, cleaned_input)
+        except Exception as exc:
+            click.echo(
+                click.style(
+                    f"\nMemory lookup failed; continuing without saved context: {exc}\n",
+                    fg="yellow",
+                )
+            )
+            profile_text = "No profile information yet."
+            memory_text = "No prior conversations yet."
 
         system = SYSTEM_PROMPT.format(
             teacher_profile=profile_text,
@@ -163,13 +180,20 @@ def main(reset: bool):
         loop_messages = list(recent_messages)
 
         while True:
-            response = client.messages.create(
-                model=config.CLAUDE_MODEL,
-                max_tokens=4096,
-                system=system,
-                tools=ALL_TOOLS,
-                messages=loop_messages,
-            )
+            try:
+                response = client.messages.create(
+                    model=config.CLAUDE_MODEL,
+                    max_tokens=4096,
+                    system=system,
+                    tools=ALL_TOOLS,
+                    messages=loop_messages,
+                )
+            except Exception as exc:
+                assistant_msg = (
+                    "I hit an error while generating a response. "
+                    f"Please try again. Details: {exc}"
+                )
+                break
 
             # Collect text blocks from this response
             text_parts = [b.text for b in response.content if b.type == "text"]
@@ -189,8 +213,12 @@ def main(reset: bool):
             for tool_use in tool_uses:
                 handler = TOOL_HANDLERS.get(tool_use.name)
                 if handler:
-                    result_text = handler(tool_use.name, tool_use.input)
-                    tool_log.append(f"[used {tool_use.name}]")
+                    try:
+                        result_text = handler(tool_use.name, tool_use.input)
+                        tool_log.append(f"[used {tool_use.name}]")
+                    except Exception as exc:
+                        result_text = f"Tool {tool_use.name} failed: {exc}"
+                        tool_log.append(f"[failed {tool_use.name}]")
                 else:
                     result_text = f"Unknown tool: {tool_use.name}"
                 tool_results.append({
@@ -213,7 +241,15 @@ def main(reset: bool):
         click.echo(f"\n🎓 Dewey: {output}\n")
 
         # Store the exchange in conversation memory
-        memory.store_exchange(cleaned_input, assistant_msg)
+        try:
+            memory.store_exchange(cleaned_input, assistant_msg)
+        except Exception as exc:
+            click.echo(
+                click.style(
+                    f"  [memory store failed: {exc}]",
+                    dim=True,
+                )
+            )
 
         # Extract new facts in the background (best-effort)
         extract_and_store_memories(client, memory, cleaned_input, assistant_msg)
