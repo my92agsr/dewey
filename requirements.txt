@@ -1,0 +1,4 @@
+anthropic>=0.40.0
+voyageai>=0.2.1
+sqlite-vec>=0.1.6
+click>=8.1.0
