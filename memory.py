@@ -1,88 +1,54 @@
-"""Memory system using Voyage AI embeddings and sqlite-vec for vector storage."""
+"""Memory system using SQLite FTS5 for full-text search retrieval."""
 
 import json
 import sqlite3
-import struct
 import time
 from typing import Optional
-
-import voyageai
 
 import config
 
 
-def _serialize_vector(vec: list[float]) -> bytes:
-    """Serialize a float vector to bytes for sqlite-vec."""
-    return struct.pack(f"{len(vec)}f", *vec)
-
-
 class Memory:
-    """Embed, store, and retrieve teacher context using Voyage + sqlite-vec."""
+    """Store and retrieve teacher context using SQLite with FTS5 full-text search."""
 
     def __init__(self, db_path: str = str(config.DB_PATH)):
         self.db_path = db_path
-        self._voyage = None
         self.conn = sqlite3.connect(db_path)
-        self.conn.enable_load_extension(True)
-        self._load_sqlite_vec()
         self._init_tables()
-
-    @property
-    def voyage(self):
-        """Lazy-init Voyage client so the module loads without an API key."""
-        if self._voyage is None:
-            self._voyage = voyageai.Client(api_key=config.VOYAGE_API_KEY)
-        return self._voyage
-
-    def _load_sqlite_vec(self):
-        """Load the sqlite-vec extension."""
-        try:
-            import sqlite_vec
-
-            self.conn.load_extension(sqlite_vec.loadable_path())
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load sqlite-vec: {e}\n"
-                "Install with: pip install sqlite-vec"
-            ) from e
 
     def _init_tables(self):
         """Create tables if they don't exist."""
-        dim = config.EMBEDDING_DIM
-        self.conn.executescript(f"""
+        self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 collection TEXT NOT NULL,
                 content TEXT NOT NULL,
                 category TEXT DEFAULT '',
                 timestamp REAL NOT NULL,
-                metadata TEXT DEFAULT '{{}}'
+                metadata TEXT DEFAULT '{}'
             );
 
-            CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors USING vec0(
-                id INTEGER PRIMARY KEY,
-                embedding float[{dim}]
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                content,
+                content='memories',
+                content_rowid='id'
             );
+
+            -- Triggers to keep FTS index in sync
+            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content)
+                    VALUES('delete', old.id, old.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content)
+                    VALUES('delete', old.id, old.content);
+                INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+            END;
         """)
         self.conn.commit()
-
-    def embed(self, text: str) -> list[float]:
-        """Get embedding for a text string using Voyage."""
-        result = self.voyage.embed(
-            texts=[text],
-            model=config.VOYAGE_MODEL,
-            input_type="document",
-        )
-        return result.embeddings[0]
-
-    def embed_query(self, text: str) -> list[float]:
-        """Get embedding for a query string using Voyage."""
-        result = self.voyage.embed(
-            texts=[text],
-            model=config.VOYAGE_MODEL,
-            input_type="query",
-        )
-        return result.embeddings[0]
 
     def store(
         self,
@@ -91,12 +57,11 @@ class Memory:
         category: str = "",
         metadata: Optional[dict] = None,
     ) -> int:
-        """Store a memory with its embedding."""
+        """Store a memory."""
         existing = self.find_exact(content=content, collection=collection, category=category)
         if existing is not None:
             return existing
 
-        embedding = self.embed(content)
         timestamp = time.time()
         meta_json = json.dumps(metadata or {})
 
@@ -105,14 +70,8 @@ class Memory:
             "VALUES (?, ?, ?, ?, ?)",
             (collection, content, category, timestamp, meta_json),
         )
-        memory_id = cursor.lastrowid
-
-        self.conn.execute(
-            "INSERT INTO memory_vectors (id, embedding) VALUES (?, ?)",
-            (memory_id, _serialize_vector(embedding)),
-        )
         self.conn.commit()
-        return memory_id
+        return cursor.lastrowid
 
     def find_exact(self, content: str, collection: str, category: str = "") -> Optional[int]:
         """Return an existing memory id for an exact match, if present."""
@@ -128,21 +87,47 @@ class Memory:
         collection: str,
         limit: int = config.MAX_MEMORY_RESULTS,
     ) -> list[dict]:
-        """Retrieve memories by semantic similarity to query."""
-        query_embedding = self.embed_query(query)
+        """Retrieve memories by FTS5 relevance to query, falling back to recency."""
+        # Try full-text search first
+        rows = self._fts_search(query, collection, limit)
 
-        rows = self.conn.execute(
-            """
-            SELECT m.id, m.content, m.category, m.timestamp, m.metadata, v.distance
-            FROM memory_vectors v
-            JOIN memories m ON m.id = v.id
-            WHERE m.collection = ?
-              AND v.embedding MATCH ?
-            ORDER BY v.distance
-            LIMIT ?
-            """,
-            (collection, _serialize_vector(query_embedding), limit),
-        ).fetchall()
+        # Fall back to most recent if FTS returns nothing
+        if not rows:
+            rows = self.conn.execute(
+                "SELECT id, content, category, timestamp, metadata "
+                "FROM memories WHERE collection = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (collection, limit),
+            ).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+        return rows
+
+    def _fts_search(self, query: str, collection: str, limit: int) -> list[dict]:
+        """Run an FTS5 search, returning ranked results."""
+        # Build an FTS query from the input — quote each token for prefix matching
+        tokens = query.split()
+        if not tokens:
+            return []
+        fts_query = " OR ".join(f'"{t}"*' for t in tokens)
+
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT m.id, m.content, m.category, m.timestamp, m.metadata,
+                       rank
+                FROM memories_fts f
+                JOIN memories m ON m.id = f.rowid
+                WHERE memories_fts MATCH ?
+                  AND m.collection = ?
+                ORDER BY f.rank
+                LIMIT ?
+                """,
+                (fts_query, collection, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Malformed FTS query — fall back
+            return []
 
         return [
             {
@@ -151,10 +136,20 @@ class Memory:
                 "category": row[2],
                 "timestamp": row[3],
                 "metadata": json.loads(row[4]),
-                "distance": row[5],
+                "rank": row[5],
             }
             for row in rows
         ]
+
+    @staticmethod
+    def _row_to_dict(row) -> dict:
+        return {
+            "id": row[0],
+            "content": row[1],
+            "category": row[2],
+            "timestamp": row[3],
+            "metadata": json.loads(row[4]),
+        }
 
     def get_all(self, collection: str) -> list[dict]:
         """Get all memories in a collection (used for teacher profile)."""
@@ -164,16 +159,7 @@ class Memory:
             (collection,),
         ).fetchall()
 
-        return [
-            {
-                "id": row[0],
-                "content": row[1],
-                "category": row[2],
-                "timestamp": row[3],
-                "metadata": json.loads(row[4]),
-            }
-            for row in rows
-        ]
+        return [self._row_to_dict(row) for row in rows]
 
     def has_profile(self) -> bool:
         """Check if a teacher profile exists."""

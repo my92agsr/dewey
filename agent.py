@@ -43,17 +43,14 @@ def build_context(memory: Memory, query: str) -> tuple[str, str]:
     else:
         profile_text = "No profile information yet."
 
-    # Relevant past conversations — retrieved by similarity
+    # Relevant past conversations — retrieved by FTS relevance or recency
     memory_items = memory.retrieve(
         query=query,
         collection=config.CONVERSATION_COLLECTION,
         limit=config.MAX_MEMORY_RESULTS,
     )
     if memory_items:
-        memory_text = "\n\n".join(
-            f"[Relevance: {1 - item['distance']:.2f}]\n{item['content']}"
-            for item in memory_items
-        )
+        memory_text = "\n\n".join(item["content"] for item in memory_items)
     else:
         memory_text = "No prior conversations yet."
 

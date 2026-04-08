@@ -15,12 +15,9 @@ PLANS_DIR.mkdir(exist_ok=True)
 
 # API keys from environment
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-VOYAGE_API_KEY = os.environ.get("VOYAGE_API_KEY", "")
 
 # Model settings
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
-VOYAGE_MODEL = "voyage-3-large"
-EMBEDDING_DIM = 1024
 
 # Memory settings
 MAX_MEMORY_RESULTS = 5
